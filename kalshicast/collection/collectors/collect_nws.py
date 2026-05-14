@@ -1,7 +1,6 @@
 # collectors/collect_nws.py
 from __future__ import annotations
 
-import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -9,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 from kalshicast.config import HEADERS
-from kalshicast.collection.collectors.base import reindex_axis
+from kalshicast.collection.collectors.base import _to_float, reindex_axis
 from kalshicast.collection.time_axis import (
     axis_start_end,
     build_hourly_axis_z,
@@ -70,18 +69,6 @@ def _extract_points_urls(lat: float, lon: float) -> Tuple[str, str, str]:
 # -------------------------
 # Parsing / unit helpers
 # -------------------------
-
-
-def _to_float(x: Any) -> Optional[float]:
-    try:
-        if x is None:
-            return None
-        v = float(x)
-        if math.isfinite(v):
-            return v
-        return None
-    except Exception:
-        return None
 
 
 def _c_to_f(c: float) -> float:

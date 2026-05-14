@@ -1,19 +1,21 @@
 # collectors/collect_ome.py  (OME_BASE)
 from __future__ import annotations
 
-import os
-import random
 import threading
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 
 from kalshicast.config import HEADERS
-from kalshicast.config.params_bootstrap import get_param_int, get_param_float
-from kalshicast.collection.collectors.base import reindex_axis, backfill_daily_from_hourly_temps
+from kalshicast.config.params_bootstrap import get_param_int
+from kalshicast.collection.collectors.base import (
+    _ensure_time_hour_z,
+    _get_with_retries,
+    backfill_daily_from_hourly_temps,
+    reindex_axis,
+)
 from kalshicast.collection.time_axis import (
     axis_start_end,
     build_hourly_axis_z,
@@ -39,7 +41,8 @@ _HOURLY_VARS = [
     "precipitation_probability",
 ]
 
-# Shared per-process client resources
+# Shared per-process client resources (kept local: collect_ome and
+# collect_ome_model run with independent semaphores by design).
 _OME_SEM = threading.BoundedSemaphore(value=get_param_int("ome.max_inflight"))
 _OME_SESSION = requests.Session()
 _OME_SESSION.headers.update(dict(HEADERS))
@@ -47,82 +50,6 @@ _OME_SESSION.mount(
     "https://",
     HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0),
 )
-
-
-def _parse_timeout_from_env(default: Tuple[float, float]) -> Tuple[float, float]:
-    env_t = (os.getenv("OME_TIMEOUT") or "").strip()
-    if not env_t:
-        return default
-    try:
-        if "," in env_t:
-            a, b = env_t.split(",", 1)
-            return (float(a.strip()), float(b.strip()))
-        v = float(env_t)
-        return (v, v)
-    except Exception:
-        return default
-
-
-def _is_retryable_exc(e: Exception) -> bool:
-    if isinstance(e, (requests.Timeout, requests.ConnectionError)):
-        return True
-    if isinstance(e, requests.HTTPError):
-        resp = getattr(e, "response", None)
-        code = getattr(resp, "status_code", None)
-        return code == 429 or (isinstance(code, int) and code >= 500)
-    return False
-
-
-def _get_with_retries(url: str, *, params: Dict[str, Any]) -> dict:
-    timeout = _parse_timeout_from_env((get_param_float("ome.timeout_connect"), get_param_float("ome.timeout_read")))
-
-    last: Optional[Exception] = None
-
-    for attempt in range(1, get_param_int("ome.max_attempts") + 1):
-        try:
-            _OME_SEM.acquire()
-            try:
-                r = _OME_SESSION.get(url, params=params, timeout=timeout)
-            finally:
-                _OME_SEM.release()
-
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, dict) and data.get("error"):
-                raise RuntimeError(f"Open-Meteo error: {data.get('reason') or data.get('message') or data}")
-            return data
-
-        except Exception as e:
-            last = e
-            if attempt >= get_param_int("ome.max_attempts") or not _is_retryable_exc(e):
-                raise
-
-            base = get_param_float("ome.backoff_base_s") * (2 ** (attempt - 1))
-            sleep_s = base * random.uniform(0.75, 1.25)
-            time.sleep(sleep_s)
-
-    raise last  # pragma: no cover
-
-
-def _ensure_time_hour_z(ts: Any) -> Optional[str]:
-    """
-    Open-Meteo hourly time is typically "YYYY-MM-DDTHH:MM" (timezone=UTC).
-    Normalize to hour-truncated "YYYY-MM-DDTHH:00:00Z".
-    """
-    if not isinstance(ts, str) or not ts.strip():
-        return None
-    s = ts.strip()
-    try:
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        dt = dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        return dt.isoformat().replace("+00:00", "Z")
-    except Exception:
-        # fallback for "YYYY-MM-DDTHH:MM"
-        if len(s) >= 13 and s[10] == "T":
-            return s[:13] + ":00:00Z"
-        return None
 
 
 def fetch_ome_forecast(station: dict, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -173,7 +100,7 @@ def fetch_ome_forecast(station: dict, params: Optional[Dict[str, Any]] = None) -
     if params:
         q.update(params)
 
-    data = _get_with_retries(OME_URL, params=q)
+    data = _get_with_retries(OME_URL, params=q, session=_OME_SESSION, semaphore=_OME_SEM)
 
     issued_at = truncate_issued_at_to_hour_z(datetime.now(timezone.utc))
     if not issued_at:

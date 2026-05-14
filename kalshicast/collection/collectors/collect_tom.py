@@ -8,8 +8,12 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from kalshicast.config import HEADERS
-from kalshicast.config.params_bootstrap import get_param_int, get_param_float
-from kalshicast.collection.collectors.base import to_float, backfill_daily_from_hourly_temps
+from kalshicast.config.params_bootstrap import get_param_int
+from kalshicast.collection.collectors.base import (
+    _ensure_time_hour_z,
+    backfill_daily_from_hourly_temps,
+    to_float,
+)
 from kalshicast.collection.time_axis import (
     axis_start_end,
     build_hourly_axis_z,
@@ -45,29 +49,6 @@ Uses collectors.time_axis to enforce a shared forward-looking UTC axis.
 Tomorrow.io typically supports 1h/1d timelines; we request a window covering the axis.
 If Tomorrow returns fewer points (rare), we keep axis and fill missing with None.
 """
-
-
-def _ensure_time_hour_z(s: Any) -> Optional[str]:
-    """
-    Tomorrow.io returns ISO timestamps with 'Z' (usually).
-    Normalize to UTC and truncate to the hour "YYYY-MM-DDTHH:00:00Z".
-    """
-    if not isinstance(s, str) or not s.strip():
-        return None
-    t = s.strip()
-    try:
-        if t.endswith("Z"):
-            dt = datetime.fromisoformat(t[:-1] + "+00:00")
-        else:
-            dt = datetime.fromisoformat(t)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-        dt = dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        return dt.isoformat().replace("+00:00", "Z")
-    except Exception:
-        if len(t) >= 13 and "T" in t:
-            return t[:13] + ":00:00Z"
-        return None
 
 
 def fetch_tom_forecast(station: dict, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
